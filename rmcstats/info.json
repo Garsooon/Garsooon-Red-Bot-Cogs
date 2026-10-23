@@ -1,0 +1,11 @@
+{
+  "author": ["Garsooon"],
+  "name": "RMCStats",
+  "short": "RetroMC player stats and leaderboards.",
+  "description": "Displays player statistics and leaderboards from the RetroMC statistics API (api.retromc.org).",
+  "install_msg": "Thanks for installing RMCStats! Try `[p]stats <username>` and `[p]leaderboard`.",
+  "requirements": ["aiohttp"],
+  "min_bot_version": "3.5.0",
+  "tags": ["retromc", "minecraft", "stats"],
+  "type": "COG"
+}
