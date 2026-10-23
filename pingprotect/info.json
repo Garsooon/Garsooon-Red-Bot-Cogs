@@ -1,0 +1,20 @@
+{
+    "name": "PingProtect",
+    "short": "Create groups of users who cannot be pinged.",
+    "description": "Create named protection groups and add members to them. When a non-privileged user mentions a protected member, the bot deletes the message (and/or warns). Supports per-group actions and role/user bypasses.",
+    "author": [
+        "Garsooon"
+    ],
+    "install_msg": "Thanks for installing PingProtect! Use `[p]pingprotect` to get started. Create a group with `[p]pingprotect create <name>` and add members with `[p]pingprotect add <name> <member>`.",
+    "requirements": [],
+    "tags": [
+        "moderation",
+        "utility",
+        "mentions",
+        "ping"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
