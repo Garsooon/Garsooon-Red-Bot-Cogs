@@ -7,6 +7,7 @@ import discord
 from discord.ext import tasks
 from redbot.core import Config, commands
 from redbot.core.bot import Red
+from redbot.core.utils.mod import is_admin_or_superior
 
 log = logging.getLogger("red.githubfeed")
 
@@ -72,6 +73,15 @@ class GithubFeed(commands.Cog):
         if use_etag and key in self._etags:
             headers["If-None-Match"] = self._etags[key]
         async with self.session.get(f"{API}{path}", params=params, headers=headers) as resp:
+            if resp.status == 401 and "Authorization" in headers:
+                # Stale or revoked token: public repos still work without one.
+                log.warning("GitHub rejected the stored token; retrying %s unauthenticated", path)
+                headers.pop("Authorization")
+                headers.pop("If-None-Match", None)
+                async with self.session.get(f"{API}{path}", params=params, headers=headers) as retry:
+                    if retry.status == 200:
+                        return 200, await retry.json()
+                    return retry.status, None
             if resp.status == 200:
                 etag = resp.headers.get("ETag")
                 if etag:
@@ -95,12 +105,13 @@ class GithubFeed(commands.Cog):
         if not self.poll.is_running():
             self.poll.restart()
 
-    async def _poll_all(self) -> int:
-        """Poll every tracked repo in every guild. Returns the number of embeds posted."""
+    async def _poll_all(self, only: Optional[List[discord.Guild]] = None) -> int:
+        """Poll tracked repos (all guilds, or just `only`). Returns the number of embeds posted."""
         posted = 0
+        allowed = {g.id for g in only} if only is not None else None
         for guild_id, data in (await self.config.all_guilds()).items():
             guild = self.bot.get_guild(guild_id)
-            if guild is None:
+            if guild is None or (allowed is not None and guild_id not in allowed):
                 continue
             for repo in list(data.get("repos", {})):
                 try:
@@ -253,11 +264,46 @@ class GithubFeed(commands.Cog):
         embed.set_footer(text=state.capitalize() + (" · draft" if pr.get("draft") else ""))
         return embed
 
+    async def _is_manager(self, user: discord.abc.User, guild: discord.Guild) -> bool:
+        if await self.bot.is_owner(user):
+            return True
+        member = guild.get_member(user.id)
+        if member is None:
+            return False
+        return member.guild_permissions.manage_guild or await is_admin_or_superior(self.bot, member)
+
+    async def _managed_guilds(self, ctx: commands.Context) -> List[discord.Guild]:
+        """The guild the command ran in, or in a DM every guild the user manages."""
+        if ctx.guild:
+            return [ctx.guild]
+        return [g for g in self.bot.guilds if await self._is_manager(ctx.author, g)]
+
+    async def _resolve(self, ctx: commands.Context, repo: str) -> Optional[Tuple[discord.Guild, str]]:
+        """Find which guild tracks `repo`, replying with an error when it is none or ambiguous."""
+        matches = []
+        for guild in await self._managed_guilds(ctx):
+            repos = await self.config.guild(guild).repos()
+            key = next((k for k in repos if k.lower() == repo.lower()), None)
+            if key:
+                matches.append((guild, key))
+        if not matches:
+            await ctx.send("That repo isn't tracked here.")
+        elif len(matches) > 1:
+            await ctx.send("That repo is tracked in several servers. Run this command in the server instead.")
+        else:
+            return matches[0]
+        return None
+
+    async def _group_check(ctx: commands.Context) -> bool:
+        cog = ctx.cog
+        if ctx.guild:
+            return await cog._is_manager(ctx.author, ctx.guild)
+        return bool(await cog._managed_guilds(ctx))
+
     @commands.group(name="githubfeed", aliases=["ghfeed"])
-    @commands.guild_only()
-    @commands.admin_or_permissions(manage_guild=True)
+    @commands.check(_group_check)
     async def githubfeed(self, ctx: commands.Context) -> None:
-        """Manage GitHub feeds."""
+        """Manage GitHub feeds. Works in servers and in DMs."""
 
     @staticmethod
     def _parse_events(events: Tuple[str, ...]) -> Optional[List[str]]:
@@ -278,8 +324,8 @@ class GithubFeed(commands.Cog):
     ) -> None:
         """Track a repo: `[p]ghfeed add owner/repo [#channel] [release commit pr]`.
 
-        Events default to all three. Private repos need a token:
-        `[p]ghfeed token` (the bot owner pastes it in a DM)
+        Events default to all three. In a DM the channel is required.
+        Private repos need a token: `[p]ghfeed token` (the bot owner pastes it in a DM)
         """
         if repo.count("/") != 1:
             await ctx.send("Use the form `owner/repo`.")
@@ -288,24 +334,34 @@ class GithubFeed(commands.Cog):
         if chosen is None:
             await ctx.send(f"Events must be any of: {', '.join(EVENTS)}.")
             return
-        channel = channel or ctx.channel
+        if channel is None:
+            if ctx.guild is None:
+                await ctx.send("In a DM, say which channel to post in: `add owner/repo #channel` (or a channel ID).")
+                return
+            channel = ctx.channel
+        guild = channel.guild
+        if not await self._is_manager(ctx.author, guild):
+            await ctx.send("You need Manage Server in that channel's server.")
+            return
         async with ctx.typing():
             status, data = await self._get(f"/repos/{repo}", use_etag=False)
         if status != 200:
-            await ctx.send(
-                "Repo not found, or the token lacks access to it."
-                if status in (403, 404)
-                else f"GitHub returned HTTP {status}."
-            )
+            if status == 401:
+                msg = "GitHub rejected the stored token (expired or invalid). The bot owner can run `ghfeed cleartoken` or `ghfeed token`."
+            elif status in (403, 404):
+                msg = "Repo not found, or the token lacks access to it."
+            else:
+                msg = f"GitHub returned HTTP {status}."
+            await ctx.send(msg)
             return
         repo = data["full_name"]
-        async with self.config.guild(ctx.guild).repos() as repos:
+        async with self.config.guild(guild).repos() as repos:
             repos[repo] = {"channel_id": channel.id, "events": chosen, "branch": None}
         await ctx.send(
             f"Tracking **{repo}** ({', '.join(chosen)}) in {channel.mention}. "
             "Existing history is not posted; only new activity from now on."
         )
-        await self._poll_baseline(ctx.guild, repo)
+        await self._poll_baseline(guild, repo)
 
     async def _poll_baseline(self, guild: discord.Guild, repo: str) -> None:
         try:
@@ -316,38 +372,40 @@ class GithubFeed(commands.Cog):
     @githubfeed.command(name="remove")
     async def gf_remove(self, ctx: commands.Context, repo: str) -> None:
         """Stop tracking a repo."""
-        async with self.config.guild(ctx.guild).repos() as repos:
-            key = next((k for k in repos if k.lower() == repo.lower()), None)
-            if key is None:
-                await ctx.send("That repo isn't tracked here.")
-                return
-            del repos[key]
+        found = await self._resolve(ctx, repo)
+        if found is None:
+            return
+        guild, key = found
+        async with self.config.guild(guild).repos() as repos:
+            repos.pop(key, None)
         await ctx.send(f"Stopped tracking **{key}**.")
 
     @githubfeed.command(name="list")
     async def gf_list(self, ctx: commands.Context) -> None:
         """List tracked repos."""
-        repos = await self.config.guild(ctx.guild).repos()
-        if not repos:
-            await ctx.send("No repos are tracked.")
-            return
         lines = []
-        for name, st in repos.items():
-            chan = ctx.guild.get_channel(st["channel_id"])
-            lines.append(
-                f"**{name}** → {chan.mention if chan else 'deleted channel'} "
-                f"({', '.join(st['events'])}{', branch ' + st['branch'] if st.get('branch') else ''})"
-            )
-        await ctx.send("\n".join(lines))
+        for guild in await self._managed_guilds(ctx):
+            for name, st in (await self.config.guild(guild).repos()).items():
+                chan = guild.get_channel(st["channel_id"])
+                where = chan.mention if chan else "deleted channel"
+                prefix = f"[{guild.name}] " if ctx.guild is None else ""
+                lines.append(
+                    f"{prefix}**{name}** → {where} "
+                    f"({', '.join(st['events'])}{', branch ' + st['branch'] if st.get('branch') else ''})"
+                )
+        await ctx.send("\n".join(lines) if lines else "No repos are tracked.")
 
     @githubfeed.command(name="channel")
     async def gf_channel(self, ctx: commands.Context, repo: str, channel: discord.TextChannel) -> None:
         """Change the channel a repo posts to."""
-        async with self.config.guild(ctx.guild).repos() as repos:
-            key = next((k for k in repos if k.lower() == repo.lower()), None)
-            if key is None:
-                await ctx.send("That repo isn't tracked here.")
-                return
+        found = await self._resolve(ctx, repo)
+        if found is None:
+            return
+        guild, key = found
+        if channel.guild != guild:
+            await ctx.send("That channel is in a different server than the repo's feed.")
+            return
+        async with self.config.guild(guild).repos() as repos:
             repos[key]["channel_id"] = channel.id
         await ctx.send(f"**{key}** now posts to {channel.mention}.")
 
@@ -358,11 +416,11 @@ class GithubFeed(commands.Cog):
         if chosen is None or not events:
             await ctx.send(f"Give one or more of: {', '.join(EVENTS)}.")
             return
-        async with self.config.guild(ctx.guild).repos() as repos:
-            key = next((k for k in repos if k.lower() == repo.lower()), None)
-            if key is None:
-                await ctx.send("That repo isn't tracked here.")
-                return
+        found = await self._resolve(ctx, repo)
+        if found is None:
+            return
+        guild, key = found
+        async with self.config.guild(guild).repos() as repos:
             repos[key]["events"] = chosen
             for event, marker in (("release", "last_release_id"), ("commit", "last_commit_sha"), ("pr", "pr_states")):
                 if event not in chosen:
@@ -372,11 +430,11 @@ class GithubFeed(commands.Cog):
     @githubfeed.command(name="branch")
     async def gf_branch(self, ctx: commands.Context, repo: str, branch: Optional[str] = None) -> None:
         """Limit commit posts to a branch (omit the branch for the default)."""
-        async with self.config.guild(ctx.guild).repos() as repos:
-            key = next((k for k in repos if k.lower() == repo.lower()), None)
-            if key is None:
-                await ctx.send("That repo isn't tracked here.")
-                return
+        found = await self._resolve(ctx, repo)
+        if found is None:
+            return
+        guild, key = found
+        async with self.config.guild(guild).repos() as repos:
             repos[key]["branch"] = branch
             repos[key].pop("last_commit_sha", None)
         await ctx.send(f"**{key}** commits now follow `{branch or 'the default branch'}`.")
@@ -458,5 +516,5 @@ class GithubFeed(commands.Cog):
     async def gf_check(self, ctx: commands.Context) -> None:
         """Poll GitHub now."""
         async with ctx.typing():
-            posted = await self._poll_all()
+            posted = await self._poll_all(await self._managed_guilds(ctx))
         await ctx.send(f"Check complete: {posted} update(s) posted.")
