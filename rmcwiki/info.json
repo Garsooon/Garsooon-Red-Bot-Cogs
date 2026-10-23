@@ -1,0 +1,22 @@
+{
+    "name": "RMCWiki",
+    "short": "Search the RetroMC wiki from Discord.",
+    "description": "Search the RetroMC wiki (https://wiki.retromc.org) and display the nearest matching page as a red embed with a short summary, a link, and near-miss suggestions.",
+    "author": [
+        "Garsooon"
+    ],
+    "install_msg": "Thanks for installing RMCWiki cog! Use `[p]wiki <query>` to search the RetroMC wiki.",
+    "requirements": [
+        "aiohttp"
+    ],
+    "tags": [
+        "wiki",
+        "retromc",
+        "minecraft",
+        "search"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
