@@ -6,7 +6,7 @@
   "end_user_data_statement": "This cog stores only repository names, channel IDs and polling markers. It stores no personal user data.",
   "install_msg": "Thanks for installing GithubFeed! Use `[p]ghfeed add owner/repo` to start. For private repos or higher rate limits the bot owner runs `[p]ghfeed token` and replies in DM.",
   "min_bot_version": "3.5.0",
-  "requirements": ["aiohttp"],
+  "requirements": [],
   "tags": ["github", "releases", "commits", "pull requests", "feed"],
   "type": "COG",
   "hidden": false,
