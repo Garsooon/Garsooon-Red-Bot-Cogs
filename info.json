@@ -2,7 +2,7 @@
   "author": ["Garsooon"],
   "name": "Garsooon-Red-Bot-Cogs",
   "short": "Red-DiscordBot cogs by Garsooon.",
-  "description": "A collection of Red-DiscordBot cogs: RetroMC stats, RetroMC wiki lookup, and ping protection.",
-  "install_msg": "Thanks for adding Garsooon-Red-Bot-Cogs! Install a cog with `[p]cog install Garsooon-Red-Bot-Cogs <cog>` (rmcstats, rmcwiki, pingprotect).",
+  "description": "A collection of Red-DiscordBot cogs: RetroMC stats, RetroMC wiki lookup, ping protection, and a GitHub feed.",
+  "install_msg": "Thanks for adding Garsooon-Red-Bot-Cogs! Install a cog with `[p]cog install Garsooon-Red-Bot-Cogs <cog>` (rmcstats, rmcwiki, pingprotect, githubfeed).",
   "tags": ["retromc", "minecraft", "utility"]
 }

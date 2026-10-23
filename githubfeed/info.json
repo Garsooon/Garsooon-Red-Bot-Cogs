@@ -1,0 +1,14 @@
+{
+  "author": ["Garsooon"],
+  "name": "GithubFeed",
+  "short": "Post GitHub releases, commits and pull requests to a Discord channel.",
+  "description": "Polls the GitHub REST API and publishes new releases, commits and pull request activity as embeds. Supports private repos through a GitHub token set by the bot owner with [p]ghfeed token (entered by DM).",
+  "end_user_data_statement": "This cog stores only repository names, channel IDs and polling markers. It stores no personal user data.",
+  "install_msg": "Thanks for installing GithubFeed! Use `[p]ghfeed add owner/repo` to start. For private repos or higher rate limits the bot owner runs `[p]ghfeed token` and replies in DM.",
+  "min_bot_version": "3.5.0",
+  "requirements": ["aiohttp"],
+  "tags": ["github", "releases", "commits", "pull requests", "feed"],
+  "type": "COG",
+  "hidden": false,
+  "disabled": false
+}

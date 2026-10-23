@@ -7,6 +7,7 @@ Cogs for [Red-DiscordBot](https://github.com/Cog-Creators/Red-DiscordBot).
 | `rmcstats`    | RetroMC player stats and leaderboards |
 | `rmcwiki`     | RetroMC wiki lookup                   |
 | `pingprotect` | Ping protection                       |
+| `githubfeed`  | GitHub releases, commits and PRs feed |
 
 ## Install
 
