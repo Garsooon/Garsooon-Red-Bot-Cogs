@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -14,6 +15,7 @@ log = logging.getLogger("red.githubfeed")
 API = "https://api.github.com"
 EVENTS = ("release", "commit", "pr")
 MAX_POSTS_PER_REPO = 10
+GITHUB_URL = re.compile(r"^(?:https?://)?(?:www\.)?github\.com/([^/\s]+)/([^/\s#?]+)", re.I)
 MAX_TRACKED_PRS = 100
 DEFAULT_INTERVAL = 300
 MIN_INTERVAL = 60
@@ -134,6 +136,9 @@ class GithubFeed(commands.Cog):
                 events += await self._check_prs(repo, state)
             channel = guild.get_channel(state["channel_id"])
             events = events[:MAX_POSTS_PER_REPO * 3]
+            if not state.get("links", True):
+                for embed in events:
+                    embed.url = None
         if not events or not isinstance(channel, discord.abc.Messageable):
             return 0
         sent = 0
@@ -162,7 +167,7 @@ class GithubFeed(commands.Cog):
         if last is None:
             return []
         new = sorted((r for r in releases if r["id"] > last), key=lambda r: r["id"])
-        return [self._release_embed(repo, r) for r in new[-MAX_POSTS_PER_REPO:]]
+        return [self._release_embed(self._label(repo, state), r) for r in new[-MAX_POSTS_PER_REPO:]]
 
     async def _check_commits(self, repo: str, state: dict) -> List[discord.Embed]:
         params = {"per_page": 20}
@@ -180,7 +185,7 @@ class GithubFeed(commands.Cog):
             if commit["sha"] == last:
                 break
             new.append(commit)
-        return [self._commit_embed(repo, c) for c in reversed(new[:MAX_POSTS_PER_REPO])]
+        return [self._commit_embed(self._label(repo, state), c, state.get("privacy", False)) for c in reversed(new[:MAX_POSTS_PER_REPO])]
 
     async def _check_prs(self, repo: str, state: dict) -> List[discord.Embed]:
         status, data = await self._get(
@@ -202,7 +207,11 @@ class GithubFeed(commands.Cog):
         if len(seen) > MAX_TRACKED_PRS:
             for key in sorted(seen, key=int)[: len(seen) - MAX_TRACKED_PRS]:
                 del seen[key]
-        return [self._pr_embed(repo, pr) for pr in changed[-MAX_POSTS_PER_REPO:]]
+        return [self._pr_embed(self._label(repo, state), pr) for pr in changed[-MAX_POSTS_PER_REPO:]]
+
+    @staticmethod
+    def _label(repo: str, state: dict) -> str:
+        return state.get("alias") or repo
 
     @staticmethod
     def _pr_state(pr: dict) -> str:
@@ -229,14 +238,14 @@ class GithubFeed(commands.Cog):
         embed.add_field(name="Tag", value=f"`{rel['tag_name']}`")
         return embed
 
-    def _commit_embed(self, repo: str, commit: dict) -> discord.Embed:
+    def _commit_embed(self, repo: str, commit: dict, private: bool = False) -> discord.Embed:
         info = commit["commit"]
         message = info["message"]
         title, _, body = message.partition("\n")
         author = commit.get("author") or {}
         embed = discord.Embed(
             title=self._clip(f"[{repo}] {title}", 256),
-            url=commit["html_url"],
+            url=None if private else commit["html_url"],
             description=self._clip(body.strip(), 1000) or None,
             color=COLOR_COMMIT,
             timestamp=discord.utils.parse_time(info["author"]["date"]),
@@ -245,7 +254,8 @@ class GithubFeed(commands.Cog):
             name=author.get("login") or info["author"]["name"],
             icon_url=author.get("avatar_url"),
         )
-        embed.set_footer(text=commit["sha"][:7])
+        if not private:
+            embed.set_footer(text=commit["sha"][:7])
         return embed
 
     def _pr_embed(self, repo: str, pr: dict) -> discord.Embed:
@@ -283,7 +293,10 @@ class GithubFeed(commands.Cog):
         matches = []
         for guild in await self._managed_guilds(ctx):
             repos = await self.config.guild(guild).repos()
-            key = next((k for k in repos if k.lower() == repo.lower()), None)
+            key = next(
+                (k for k, st in repos.items() if repo.lower() in (k.lower(), (st.get("alias") or "").lower())),
+                None,
+            )
             if key:
                 matches.append((guild, key))
         if not matches:
@@ -304,6 +317,16 @@ class GithubFeed(commands.Cog):
     @commands.check(_group_check)
     async def githubfeed(self, ctx: commands.Context) -> None:
         """Manage GitHub feeds. Works in servers and in DMs."""
+
+    @staticmethod
+    def _parse_repo(text: str) -> Optional[str]:
+        """Accept `owner/repo` or a github.com link (with optional .git, trailing path, or <>)."""
+        text = text.strip("<>")
+        match = GITHUB_URL.match(text)
+        if match:
+            owner, name = match.groups()
+            return f"{owner}/{name[:-4] if name.endswith('.git') else name}"
+        return text if text.count("/") == 1 and " " not in text else None
 
     @staticmethod
     def _parse_events(events: Tuple[str, ...]) -> Optional[List[str]]:
@@ -327,8 +350,9 @@ class GithubFeed(commands.Cog):
         Events default to all three. In a DM the channel is required.
         Private repos need a token: `[p]ghfeed token` (the bot owner pastes it in a DM)
         """
-        if repo.count("/") != 1:
-            await ctx.send("Use the form `owner/repo`.")
+        repo = self._parse_repo(repo)
+        if repo is None:
+            await ctx.send("Use `owner/repo` or a GitHub link like `https://github.com/owner/repo`.")
             return
         chosen = self._parse_events(events)
         if chosen is None:
@@ -389,9 +413,14 @@ class GithubFeed(commands.Cog):
                 chan = guild.get_channel(st["channel_id"])
                 where = chan.mention if chan else "deleted channel"
                 prefix = f"[{guild.name}] " if ctx.guild is None else ""
+                extras = ", ".join(
+                    ([f"alias {st['alias']}"] if st.get("alias") else [])
+                    + (["links off"] if not st.get("links", True) else [])
+                    + (["privacy on"] if st.get("privacy") else [])
+                    + ([f"branch {st['branch']}"] if st.get("branch") else [])
+                )
                 lines.append(
-                    f"{prefix}**{name}** → {where} "
-                    f"({', '.join(st['events'])}{', branch ' + st['branch'] if st.get('branch') else ''})"
+                    f"{prefix}**{name}** → {where} ({', '.join(st['events'])}{'; ' + extras if extras else ''})"
                 )
         await ctx.send("\n".join(lines) if lines else "No repos are tracked.")
 
@@ -438,6 +467,57 @@ class GithubFeed(commands.Cog):
             repos[key]["branch"] = branch
             repos[key].pop("last_commit_sha", None)
         await ctx.send(f"**{key}** commits now follow `{branch or 'the default branch'}`.")
+
+    @githubfeed.command(name="alias")
+    async def gf_alias(self, ctx: commands.Context, repo: str, *, alias: Optional[str] = None) -> None:
+        """Show a nicer name for a repo in posts. Omit the alias to clear it.
+
+        The alias can also be used in place of `owner/repo` in other commands.
+        """
+        found = await self._resolve(ctx, repo)
+        if found is None:
+            return
+        guild, key = found
+        if alias is not None:
+            alias = alias.strip()
+            if not alias or len(alias) > 50:
+                await ctx.send("The alias must be 1-50 characters.")
+                return
+        async with self.config.guild(guild).repos() as repos:
+            taken = alias and any(
+                k != key and alias.lower() in (k.lower(), (st.get("alias") or "").lower())
+                for k, st in repos.items()
+            )
+            if taken:
+                await ctx.send("That name is already used by another tracked repo.")
+                return
+            if alias:
+                repos[key]["alias"] = alias
+            else:
+                repos[key].pop("alias", None)
+        await ctx.send(f"**{key}** will be shown as **{alias}**." if alias else f"Alias cleared for **{key}**.")
+
+    @githubfeed.command(name="links")
+    async def gf_links(self, ctx: commands.Context, repo: str, setting: bool) -> None:
+        """Turn clickable links on or off in a repo's posts: `[p]ghfeed links <repo> on|off`."""
+        found = await self._resolve(ctx, repo)
+        if found is None:
+            return
+        guild, key = found
+        async with self.config.guild(guild).repos() as repos:
+            repos[key]["links"] = setting
+        await ctx.send(f"Links in **{key}** posts are now {'on' if setting else 'off'}.")
+
+    @githubfeed.command(name="privacy")
+    async def gf_privacy(self, ctx: commands.Context, repo: str, setting: bool) -> None:
+        """Hide the commit hash and link in commit posts: `[p]ghfeed privacy <repo> on|off`."""
+        found = await self._resolve(ctx, repo)
+        if found is None:
+            return
+        guild, key = found
+        async with self.config.guild(guild).repos() as repos:
+            repos[key]["privacy"] = setting
+        await ctx.send(f"Privacy mode for **{key}** is now {'on' if setting else 'off'}.")
 
     @githubfeed.command(name="token")
     @commands.is_owner()
